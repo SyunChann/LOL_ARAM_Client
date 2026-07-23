@@ -7,6 +7,7 @@ import {
   Flame,
   Gauge,
   History,
+  ListFilter,
   Search,
   ShieldCheck,
   Swords,
@@ -85,43 +86,13 @@ function App() {
   const [lcuError, setLcuError] = useState('');
   const [exploreError, setExploreError] = useState('');
   const [detailError, setDetailError] = useState('');
-  const profile = useMemo(() => parseRiotId(activeRiotId), [activeRiotId]);
+  const [matchFilter, setMatchFilter] = useState('all');
+  const [matchOrder, setMatchOrder] = useState('recent');
+  const profile = data?.account || parseRiotId(activeRiotId);
 
   useEffect(() => {
-    const controller = new AbortController();
-
-    async function loadMatches() {
-      setStatus('loading');
-      setError('');
-
-      try {
-        const response = await fetch(`/api/mayhem?riotId=${encodeURIComponent(activeRiotId)}`, {
-          signal: controller.signal,
-        });
-        const payload = await response.json();
-
-        if (!response.ok) {
-          throw new Error(payload.message || '전적을 가져오지 못했습니다.');
-        }
-
-        setData(payload);
-        setExploreData(null);
-        setDetailTargetId(null);
-        setSelectedMatch(null);
-        setDetailStatus('idle');
-        setLcuStatus('idle');
-        setStatus('ready');
-      } catch (err) {
-        if (err.name === 'AbortError') return;
-        setError(err.message);
-        setData(null);
-        setStatus('error');
-      }
-    }
-
-    loadMatches();
-    return () => controller.abort();
-  }, [activeRiotId]);
+    handleLcuLoad();
+  }, []);
 
   const matches = data?.matches || [];
   const wins = matches.filter((match) => match.win).length;
@@ -133,13 +104,23 @@ function App() {
     : 0;
   const bestMatch = matches.reduce((best, match) => (!best || match.chaos > best.chaos ? match : best), null);
   const champions = normalizeChampionStats(matches);
+  const displayedMatches = useMemo(() => {
+    const filtered = matches.filter((match) => (
+      matchFilter === 'all' || (matchFilter === 'win' ? match.win : !match.win)
+    ));
+
+    return [...filtered].sort((a, b) => (
+      matchOrder === 'chaos' ? b.chaos - a.chaos : 0
+    ));
+  }, [matches, matchFilter, matchOrder]);
 
   function handleSubmit(event) {
     event.preventDefault();
-    setActiveRiotId(query);
+    handleLcuLoad();
   }
 
   async function handleLcuLoad() {
+    setStatus('loading');
     setLcuStatus('loading');
     setLcuError('');
 
@@ -161,6 +142,7 @@ function App() {
     } catch (err) {
       setLcuError(err.message);
       setLcuStatus('error');
+      setStatus('error');
     }
   }
 
@@ -234,7 +216,7 @@ function App() {
 
         <form className="search-panel" onSubmit={handleSubmit}>
           <div className="search-heading">
-            <label htmlFor="riot-id">Riot ID</label>
+            <label htmlFor="riot-id">현재 클라이언트 계정</label>
             {champions.length > 0 && (
               <button type="button" className="ghost-button" onClick={() => setIsChampionDialogOpen(true)}>
                 <ShieldCheck size={16} />
@@ -246,41 +228,25 @@ function App() {
             <Search size={20} aria-hidden="true" />
             <input
               id="riot-id"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="닉네임#태그"
+              value={`${profile.gameName}#${profile.tagLine}`}
+              readOnly
             />
             <button type="submit" disabled={status === 'loading'}>
               <ArrowUpRight size={18} />
-              검색
+              새로고침
             </button>
           </div>
           {data?.updatedAt && <p className="search-meta">최근 갱신: {data.updatedAt}</p>}
         </form>
       </section>
 
-      {status === 'loading' && <StateMessage title="불러오는 중" body="Riot API에서 아수라장 전적을 확인하고 있습니다." />}
-      {status === 'error' && <StateMessage title="연결 필요" body={error} />}
+      {status === 'loading' && <StateMessage title="클라이언트 전적 조회 중" body="실행 중인 롤 클라이언트의 아수라장 대전 기록을 읽고 있습니다." />}
+      {status === 'error' && <StateMessage title="롤 클라이언트 연결 필요" body={lcuError || '롤 클라이언트를 실행하고 로그인한 뒤 새로고침해 주세요.'} />}
 
       {status === 'ready' && matches.length === 0 && (
-        <>
-          <StateMessage title="아수라장 기록 없음" body={getEmptyMessage(data)} />
-          <section className="explore-actions">
-            <button type="button" onClick={handleLcuLoad} disabled={lcuStatus === 'loading'}>
-              <Database size={18} />
-              클라이언트 전적 가져오기
-            </button>
-            <button type="button" onClick={handleExplore} disabled={exploreStatus === 'loading'}>
-              <Database size={18} />
-              최근 40경기 큐 탐색
-            </button>
-            <p>롤 클라이언트가 켜져 있으면 인게임 대전 기록을 직접 읽을 수 있습니다.</p>
-          </section>
-        </>
+        <StateMessage title="아수라장 기록 없음" body="롤 클라이언트의 최근 대전 기록에서 아수라장 경기를 찾지 못했습니다." />
       )}
 
-      {lcuStatus === 'loading' && <StateMessage title="클라이언트 전적 조회 중" body="실행 중인 롤 클라이언트의 대전 기록을 읽고 있습니다." />}
-      {lcuStatus === 'error' && <StateMessage title="클라이언트 전적 실패" body={lcuError} />}
       {exploreStatus === 'loading' && <StateMessage title="큐 탐색 중" body="최근 매치 상세를 순차 조회하고 있습니다." />}
       {exploreStatus === 'error' && <StateMessage title="큐 탐색 실패" body={exploreError} />}
       {exploreStatus === 'ready' && exploreData && <ExplorePanel data={exploreData} />}
@@ -297,15 +263,51 @@ function App() {
           <section className="content-layout">
             <div className="match-column">
               <div className="section-heading">
-                <History size={20} />
-                <h2>최근 아수라장</h2>
+                <div>
+                  <span className="section-kicker"><History size={15} /> MATCH HISTORY</span>
+                  <h2>최근 아수라장</h2>
+                </div>
+                <div className="match-controls" aria-label="경기 목록 제어">
+                  <div className="filter-group" role="group" aria-label="승패 필터">
+                    <ListFilter size={15} aria-hidden="true" />
+                    {[
+                      ['all', '전체'],
+                      ['win', '승리'],
+                      ['loss', '패배'],
+                    ].map(([value, label]) => (
+                      <button
+                        type="button"
+                        className={matchFilter === value ? 'active' : ''}
+                        key={value}
+                        onClick={() => setMatchFilter(value)}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    className="sort-button"
+                    onClick={() => setMatchOrder((order) => order === 'recent' ? 'chaos' : 'recent')}
+                  >
+                    {matchOrder === 'recent' ? '최신순' : '난전 지수순'}
+                  </button>
+                </div>
               </div>
               <div className="match-list">
-                {matches.map((match) => (
+                {displayedMatches.map((match) => (
                   <React.Fragment key={match.id}>
                     <article
                       className={`match-card ${match.win ? 'win' : 'loss'} ${data?.source === 'LCU' ? 'clickable' : ''}`}
                       onClick={() => handleMatchClick(match)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault();
+                          handleMatchClick(match);
+                        }
+                      }}
+                      role={data?.source === 'LCU' ? 'button' : undefined}
+                      tabIndex={data?.source === 'LCU' ? 0 : undefined}
                     >
                       <div className="match-main">
                         <div>
@@ -323,8 +325,9 @@ function App() {
                         <Metric label="딜량" value={formatNumber(match.damage)} />
                         <Metric label="받은 피해" value={formatNumber(match.taken)} />
                         <Metric label="골드" value={formatNumber(match.gold)} />
-                        <Metric label="킬 관여" value={match.killParticipation == null ? '-' : `${match.killParticipation}%`} />
+                        <Metric label="난전 지수" value={`${match.chaos}점`} />
                       </div>
+                      <MatchPreview match={match} />
                       <div className="tag-row">
                         <span>레벨 {match.level}</span>
                         <span>CS {match.cs}</span>
@@ -352,6 +355,9 @@ function App() {
                     )}
                   </React.Fragment>
                 ))}
+                {displayedMatches.length === 0 && (
+                  <div className="empty-filter">선택한 조건에 맞는 경기가 없습니다.</div>
+                )}
               </div>
             </div>
           </section>
@@ -479,6 +485,11 @@ function MatchDetail({ detail, onClose }) {
                       <div className="spell-cell">
                         {player.spells?.map((spell) => <SpellIcon spell={spell} key={spell.id} />)}
                       </div>
+                      {player.augments?.length > 0 && (
+                        <div className="player-augment-row">
+                          {player.augments.map((augment) => <AugmentIcon augment={augment} key={augment.id} />)}
+                        </div>
+                      )}
                       <div>
                         <strong>{player.riotId}</strong>
                         <span>{player.champion} · Lv.{player.level}</span>
@@ -556,18 +567,126 @@ function assetUrl(path) {
   return `/api/lcu/asset?path=${encodeURIComponent(path)}`;
 }
 
-function ChampionIcon({ championId }) {
-  return <img className="champion-icon" alt="" src={assetUrl(`/lol-game-data/assets/v1/champion-icons/${championId}.png`)} />;
+function ChampionIcon({ championId, className = 'champion-icon' }) {
+  return <img className={className} alt="" src={assetUrl(`/lol-game-data/assets/v1/champion-icons/${championId}.png`)} />;
 }
 
 function ItemIcon({ item }) {
   if (!item.iconPath) return <span className="empty-item" />;
-  return <img alt="" src={assetUrl(item.iconPath)} />;
+  return <HoverTooltip info={item}><img alt={item.name || '아이템'} src={assetUrl(item.iconPath)} /></HoverTooltip>;
 }
 
 function SpellIcon({ spell }) {
   if (!spell.iconPath) return <span className="empty-spell" />;
-  return <img className="spell-icon" alt="" src={assetUrl(spell.iconPath)} />;
+  return <HoverTooltip info={spell}><img className="spell-icon" alt={spell.name || '스펠'} src={assetUrl(spell.iconPath)} /></HoverTooltip>;
+}
+
+function AugmentIcon({ augment }) {
+  const rarityClass = getRarityClass(augment.rarity);
+  const rarityName = getRarityName(augment.rarity);
+  const info = { ...augment, description: [rarityName, augment.description].filter(Boolean).join(' · ') };
+  if (!augment.iconPath) return <span className={`empty-augment ${rarityClass}`}>?</span>;
+  return <HoverTooltip info={info}><img className={`augment-icon ${rarityClass}`} alt={augment.name || '증강'} src={assetUrl(augment.iconPath)} /></HoverTooltip>;
+}
+
+function getRarityClass(rarity) {
+  const value = String(rarity || '').toLowerCase();
+  if (value.includes('prismatic')) return 'rarity-prismatic';
+  if (value.includes('gold')) return 'rarity-gold';
+  if (value.includes('silver')) return 'rarity-silver';
+  if (value.includes('bronze')) return 'rarity-bronze';
+  return 'rarity-unknown';
+}
+
+function getRarityName(rarity) {
+  const labels = {
+    'rarity-prismatic': '프리즘 증강',
+    'rarity-gold': '골드 증강',
+    'rarity-silver': '실버 증강',
+    'rarity-bronze': '브론즈 증강',
+  };
+  return labels[getRarityClass(rarity)] || '증강';
+}
+
+function HoverTooltip({ info, children }) {
+  const [position, setPosition] = useState(null);
+
+  function updatePosition(event) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    setPosition({ left: rect.left + (rect.width / 2), top: rect.top - 8 });
+  }
+
+  return (
+    <span className="tooltip-trigger" tabIndex={0} onMouseEnter={updatePosition} onFocus={updatePosition}>
+      {children}
+      <span
+        className="hover-tooltip"
+        role="tooltip"
+        style={position ? { left: position.left, top: position.top } : undefined}
+      >
+        <strong>{info.name || '정보 없음'}</strong>
+        {info.description && <small>{info.description}</small>}
+      </span>
+    </span>
+  );
+}
+
+function MatchPreview({ match }) {
+  if (!match.championId) return null;
+
+  return (
+    <div className="match-preview" aria-label="경기 요약 구성">
+      <div className="preview-loadout">
+        <div className="preview-champion">
+          <ChampionIcon championId={match.championId} className="preview-champion-icon" />
+          <span>{match.level}</span>
+        </div>
+        <div className="preview-group preview-spells">
+          <span className="preview-label">스펠</span>
+          <div className="preview-spell-icons">
+            {match.spells?.map((spell) => <SpellIcon spell={spell} key={spell.id} />)}
+          </div>
+        </div>
+        <div className="preview-group preview-items">
+          <span className="preview-label">아이템</span>
+          <div className="preview-item-icons">
+            {match.items?.map((item) => <ItemIcon item={item} key={item.id} />)}
+          </div>
+        </div>
+        {match.augments?.length > 0 && (
+          <div className="preview-group preview-augments">
+            <span className="preview-label">증강</span>
+            <div className="preview-augment-icons">
+              {match.augments.map((augment) => <AugmentIcon augment={augment} key={augment.id} />)}
+            </div>
+          </div>
+        )}
+      </div>
+      {match.teams?.length > 0 && (
+        <div className="preview-rosters">
+          {match.teams.map((team) => {
+            const opponents = team.players.filter((player) => !player.isCurrentSummoner);
+            if (opponents.length === 0) return null;
+            return (
+            <div className={`roster-column ${team.win ? 'winner' : ''}`} key={team.teamId}>
+              {opponents.map((player, index) => (
+                <div className="roster-player" key={`${team.teamId}-${index}`}>
+                  <ChampionIcon championId={player.championId} className="roster-champion-icon" />
+                  <span title={player.riotId}>{player.riotId}</span>
+                  {player.augments?.length > 0 && (
+                    <div className="roster-augment-row">
+                      {player.augments.map((augment) => <AugmentIcon augment={augment} key={augment.id} />)}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function DamageChart({ teams }) {

@@ -11,6 +11,9 @@ export default defineConfig(({ mode }) => {
   Object.assign(process.env, loadEnv(mode, process.cwd(), ''));
 
   return {
+    build: {
+      outDir: 'web-dist',
+    },
     plugins: [
       react(),
       {
@@ -168,13 +171,14 @@ async function riotFetch(url, key) {
   return response.json();
 }
 
-async function getLcuMayhemDetail(gameId) {
+export async function getLcuMayhemDetail(gameId) {
   const client = createLcuClient();
   const currentSummoner = await client.fetchJson('/lol-summoner/v1/current-summoner');
   const game = await client.fetchJson(`/lol-match-history/v1/games/${gameId}`);
   const championNames = new Map();
   const itemPaths = await getLcuItemPaths(client);
   const spellPaths = await getLcuSpellPaths(client);
+  const augmentPaths = await getLcuAugmentPaths(client);
 
   return {
     source: 'LCU',
@@ -201,14 +205,14 @@ async function getLcuMayhemDetail(gameId) {
         players: await Promise.all(
           (game.participants || [])
             .filter((participant) => participant.teamId === team.teamId)
-            .map((participant) => toLcuDetailPlayer(participant, game, currentSummoner, client, championNames, itemPaths, spellPaths, team)),
+            .map((participant) => toLcuDetailPlayer(participant, game, currentSummoner, client, championNames, itemPaths, spellPaths, augmentPaths, team)),
         ),
       })),
     ),
   };
 }
 
-async function getLcuMayhemMatches(count) {
+export async function getLcuMayhemMatches(count) {
   const client = createLcuClient();
   const currentSummoner = await client.fetchJson('/lol-summoner/v1/current-summoner');
   const history = await client.fetchJson(
@@ -216,12 +220,15 @@ async function getLcuMayhemMatches(count) {
   );
   const games = history?.games?.games || [];
   const championNames = new Map();
+  const itemPaths = await getLcuItemPaths(client);
+  const spellPaths = await getLcuSpellPaths(client);
+  const augmentPaths = await getLcuAugmentPaths(client);
 
   const matches = [];
   for (const game of games) {
     if (game.gameMode !== MAYHEM_GAME_MODE) continue;
 
-    const summary = await toLcuMatchSummary(game, currentSummoner, client, championNames);
+    const summary = await toLcuMatchSummary(game, currentSummoner, client, championNames, itemPaths, spellPaths, augmentPaths);
     if (summary) matches.push(summary);
   }
 
@@ -288,7 +295,7 @@ function findLockfile() {
   return candidates.find((path) => existsSync(path)) || null;
 }
 
-async function toLcuMatchSummary(game, summoner, client, championNames) {
+async function toLcuMatchSummary(game, summoner, client, championNames, itemPaths, spellPaths, augmentPaths) {
   const identity = game.participantIdentities?.find((item) => item.player?.puuid === summoner.puuid);
   if (!identity) return null;
 
@@ -311,6 +318,36 @@ async function toLcuMatchSummary(game, summoner, client, championNames) {
     ? Math.round((((stats.kills || 0) + (stats.assists || 0)) / teamKills) * 100)
     : null;
   const champion = await getLcuChampionName(participant.championId, client, championNames);
+  const items = [stats.item0, stats.item1, stats.item2, stats.item3, stats.item4, stats.item5, stats.item6]
+    .filter((itemId) => itemId && itemId !== 0)
+    .map((itemId) => ({ id: itemId, ...(itemPaths.get(itemId) || {}) }));
+  const spells = [participant.spell1Id, participant.spell2Id]
+    .filter(Boolean)
+    .map((spellId) => ({ id: spellId, ...(spellPaths.get(spellId) || {}) }));
+  const augments = Object.entries(stats)
+    .filter(([key, value]) => key.startsWith('playerAugment') && value && value !== 0)
+    .map(([, augmentId]) => ({ id: augmentId, ...(augmentPaths.get(augmentId) || augmentPaths.get(String(augmentId)) || {}) }));
+  const teams = (game.teams || []).map((gameTeam) => ({
+    teamId: gameTeam.teamId,
+    win: gameTeam.win === 'Win',
+    players: (game.participants || [])
+      .filter((player) => (player.teamId || (player.participantId <= 5 ? 100 : 200)) === gameTeam.teamId)
+      .map((player) => {
+        const playerIdentity = game.participantIdentities?.find((item) => item.participantId === player.participantId);
+        const playerAugments = Object.entries(player.stats || {})
+          .filter(([key, value]) => key.startsWith('playerAugment') && value && value !== 0)
+          .map(([, augmentId]) => ({
+            id: augmentId,
+            ...(augmentPaths.get(augmentId) || augmentPaths.get(String(augmentId)) || {}),
+          }));
+        return {
+          championId: player.championId,
+          riotId: playerIdentity?.player?.gameName || '-',
+          isCurrentSummoner: playerIdentity?.player?.puuid === summoner.puuid,
+          augments: playerAugments,
+        };
+      }),
+  }));
 
   return {
     id: `KR_${game.gameId}`,
@@ -329,6 +366,11 @@ async function toLcuMatchSummary(game, summoner, client, championNames) {
     taken: stats.totalDamageTaken || 0,
     gold: stats.goldEarned || 0,
     cs: (stats.totalMinionsKilled || 0) + (stats.neutralMinionsKilled || 0),
+    championId: participant.championId,
+    items,
+    spells,
+    augments,
+    teams,
     killParticipation,
     chaos: calculateChaos(
       {
@@ -343,7 +385,7 @@ async function toLcuMatchSummary(game, summoner, client, championNames) {
   };
 }
 
-async function toLcuDetailPlayer(participant, game, currentSummoner, client, championNames, itemPaths = new Map(), spellPaths = new Map(), team = null) {
+async function toLcuDetailPlayer(participant, game, currentSummoner, client, championNames, itemPaths = new Map(), spellPaths = new Map(), augmentPaths = new Map(), team = null) {
   const identity = game.participantIdentities?.find((item) => item.participantId === participant.participantId);
   const stats = participant.stats || {};
   const champion = await getLcuChampionName(participant.championId, client, championNames);
@@ -355,6 +397,9 @@ async function toLcuDetailPlayer(participant, game, currentSummoner, client, cha
   const killParticipation = teamKills
     ? Math.round((((stats.kills || 0) + (stats.assists || 0)) / teamKills) * 100)
     : null;
+  const augments = Object.entries(stats)
+    .filter(([key, value]) => key.startsWith('playerAugment') && value && value !== 0)
+    .map(([, augmentId]) => ({ id: augmentId, ...(augmentPaths.get(augmentId) || augmentPaths.get(String(augmentId)) || {}) }));
 
   return {
     participantId: participant.participantId,
@@ -372,27 +417,57 @@ async function toLcuDetailPlayer(participant, game, currentSummoner, client, cha
     taken: stats.totalDamageTaken || 0,
     gold: stats.goldEarned || 0,
     cs: (stats.totalMinionsKilled || 0) + (stats.neutralMinionsKilled || 0),
-    items: itemIds.map((itemId) => ({
-      id: itemId,
-      iconPath: itemPaths.get(itemId) || null,
-    })),
+    items: itemIds.map((itemId) => ({ id: itemId, ...(itemPaths.get(itemId) || {}) })),
     spells: [participant.spell1Id, participant.spell2Id]
       .filter(Boolean)
-      .map((spellId) => ({
-        id: spellId,
-        iconPath: spellPaths.get(spellId) || null,
-      })),
+      .map((spellId) => ({ id: spellId, ...(spellPaths.get(spellId) || {}) })),
+    augments,
   };
 }
 
 async function getLcuItemPaths(client) {
   const items = await client.fetchJson('/lol-game-data/assets/v1/items.json');
-  return new Map(items.map((item) => [item.id, item.iconPath]));
+  return new Map(items.map((item) => [item.id, {
+    name: item.name || `아이템 ${item.id}`,
+    description: toPlainText(item.description),
+    iconPath: item.iconPath || null,
+  }]));
 }
 
 async function getLcuSpellPaths(client) {
   const spells = await client.fetchJson('/lol-game-data/assets/v1/summoner-spells.json');
-  return new Map(spells.map((spell) => [spell.id, spell.iconPath]));
+  return new Map(spells.map((spell) => [spell.id, {
+    name: spell.name || `스펠 ${spell.id}`,
+    description: toPlainText(spell.description),
+    iconPath: spell.iconPath || null,
+  }]));
+}
+
+async function getLcuAugmentPaths(client) {
+  try {
+    // 아수라장/투기장 계열 증강은 일반 augments.json이 아니라
+    // cherry-augments.json에 등록되어 있다.
+    const cherryAugments = await client.fetchJson('/lol-game-data/assets/v1/cherry-augments.json');
+    return new Map(cherryAugments.flatMap((augment) => {
+      const value = {
+        name: augment.nameTRA || augment.simpleNameTRA || augment.name || augment.augmentName || augment.displayName || augment.apiName || `증강 ${augment.id}`,
+        description: toPlainText(augment.descriptionTRA || augment.description || augment.augmentDescription || augment.tooltip || augment.longDescription),
+        iconPath: augment.iconPath || augment.augmentSmallIconPath || augment.smallIconPath || augment.icon || null,
+        rarity: augment.rarity || null,
+      };
+      return [[augment.id, value], [String(augment.id), value]];
+    }));
+  } catch {
+    return new Map();
+  }
+}
+
+function toPlainText(value) {
+  return String(value || '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 async function getLcuChampionName(championId, client, championNames) {
@@ -598,27 +673,45 @@ async function proxyLcuAsset(req, res) {
   const url = new URL(req.url, 'http://localhost');
   const path = url.searchParams.get('path');
 
+  try {
+    const { contentType, bytes } = await getLcuAsset(path);
+    res.statusCode = 200;
+    res.setHeader('Content-Type', contentType);
+    res.end(bytes);
+  } catch (error) {
+    sendJson(res, error.status || 500, { message: error.message });
+  }
+}
+
+export async function getLcuAsset(path) {
   if (!path?.startsWith('/lol-game-data/assets/')) {
-    sendJson(res, 400, { message: '허용되지 않은 asset path입니다.' });
-    return;
+    const error = new Error('허용되지 않은 asset path입니다.');
+    error.status = 400;
+    throw error;
   }
 
-  const [, , port, password, protocol] = readFileSync(findLockfile(), 'utf8').trim().split(':');
+  const lockfilePath = findLockfile();
+  if (!lockfilePath) {
+    const error = new Error('롤 클라이언트가 실행 중이어야 에셋을 불러올 수 있습니다.');
+    error.status = 503;
+    throw error;
+  }
+
+  const [, , port, password, protocol] = readFileSync(lockfilePath, 'utf8').trim().split(':');
   const auth = Buffer.from(`riot:${password}`).toString('base64');
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
   const response = await fetch(`${protocol}://127.0.0.1:${port}${path}`, {
-    headers: {
-      Authorization: `Basic ${auth}`,
-    },
+    headers: { Authorization: `Basic ${auth}` },
   });
 
   if (!response.ok) {
-    sendJson(res, response.status, { message: `LCU asset 오류: ${response.status}` });
-    return;
+    const error = new Error(`LCU asset 오류: ${response.status}`);
+    error.status = response.status;
+    throw error;
   }
 
-  const bytes = Buffer.from(await response.arrayBuffer());
-  res.statusCode = 200;
-  res.setHeader('Content-Type', response.headers.get('content-type') || 'application/octet-stream');
-  res.end(bytes);
+  return {
+    contentType: response.headers.get('content-type') || 'application/octet-stream',
+    bytes: Buffer.from(await response.arrayBuffer()),
+  };
 }
